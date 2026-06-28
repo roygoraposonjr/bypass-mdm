@@ -106,8 +106,8 @@ find_available_uid() {
 # ─────────────────────────────────────────────────────────────
 # detect_all_installations()
 #
-# Uses `diskutil apfs list` to enumerate every APFS container
-# and pair System volumes with their Data volumes by role.
+# Uses `diskutil info` per APFS volume slice to enumerate every
+# container, pairing System volumes with Data volumes by role.
 # Falls back to /Volumes/ name-scanning for non-APFS setups.
 # Prints one record per installation to stdout:
 #
@@ -118,112 +118,85 @@ find_available_uid() {
 detect_all_installations() {
 	local -a found=()
 
-	info "Scanning APFS containers for macOS installations..." >&2
+	info "Scanning APFS volumes for macOS installations..." >&2
 
-	# ── Parse every APFS container with diskutil apfs list ───────────
-	# This reliably finds volumes by role regardless of their display name.
-	local current_sys_disk="" current_sys_name=""
-	local current_data_disk="" current_data_name=""
+	# ── Step 1: collect role/container info for every APFS volume slice ──
+	# Using `diskutil info` per-slice avoids parsing the complex
+	# `diskutil apfs list` table (which includes UUIDs that break regex).
+	local -a vol_records=()
+	local _disk
+	for _disk in $(diskutil list 2>/dev/null | awk '/Apple_APFS / { print $NF }'); do
+		local _info _name _role _container
+		_info=$(diskutil info "$_disk" 2>/dev/null)
+		[ -z "$_info" ] && continue
+		_name=$(printf '%s\n' "$_info"      | awk -F':[[:space:]]+' '/Volume Name/  { print $2 }' | head -1)
+		_role=$(printf '%s\n' "$_info"      | awk -F':[[:space:]]+' '/APFS Role/    { print $2 }' | head -1)
+		_container=$(printf '%s\n' "$_info" | awk -F':[[:space:]]+' '/Part of Whole/{ print $2 }' | head -1)
+		[ -z "$_name" ] || [ -z "$_container" ] && continue
+		vol_records+=("${_disk}|${_name}|${_role}|${_container}")
+	done
 
-	# We process the output line by line, tracking System+Data pairs
-	# within the same APFS container.
-	while IFS= read -r line; do
-		# Detect a new APFS Container boundary – flush any pending pair
-		if [[ "$line" =~ "APFS Container" ]]; then
-			# Flush previous container's pair if complete
-			if [ -n "$current_sys_name" ] && [ -n "$current_data_name" ]; then
-				# Ensure data volume is mounted
-				if [ ! -d "/Volumes/$current_data_name" ]; then
-					info "  Mounting data volume '$current_data_name' ($current_data_disk)..." >&2
-					diskutil mount "$current_data_disk" >/dev/null 2>&1
-				fi
-				# Verify dslocal exists after mount
-				if [ -d "/Volumes/$current_data_name/private/var/db/dslocal/nodes/Default" ]; then
-					local disk_id
-					disk_id=$(diskutil info "$current_data_disk" 2>/dev/null \
-						| awk '/Device Identifier/ { print $NF }')
-					[ -z "$disk_id" ] && disk_id="$current_data_disk"
-					found+=("${current_sys_name}|${current_data_name}|${disk_id}")
-					info "  Found: system='$current_sys_name'  data='$current_data_name'  disk='$disk_id'" >&2
-				fi
+	# ── Step 2: pair each System volume with its Data volume ─────────────
+	local _sys_rec
+	for _sys_rec in "${vol_records[@]}"; do
+		IFS='|' read -r _sys_disk _sys_name _sys_role _sys_cont <<< "$_sys_rec"
+		# Accept "System" role or "No specific role" (older macOS)
+		[[ "$_sys_role" != *"System"* ]] && [[ "$_sys_role" != *"No specific role"* ]] && continue
+		# Confirm by checking for a /System directory
+		[ -d "/Volumes/${_sys_name}/System" ] || continue
+
+		local _data_rec
+		for _data_rec in "${vol_records[@]}"; do
+			IFS='|' read -r _data_disk _data_name _data_role _data_cont <<< "$_data_rec"
+			[[ "$_data_role" != *"Data"* ]]    && continue
+			[ "$_data_cont" = "$_sys_cont" ]   || continue
+
+			# Mount the data volume if it is not already mounted
+			if [ ! -d "/Volumes/${_data_name}" ]; then
+				info "  Mounting '${_data_name}' (${_data_disk})..." >&2
+				diskutil mount "$_data_disk" >/dev/null 2>&1
 			fi
-			current_sys_disk=""; current_sys_name=""
-			current_data_disk=""; current_data_name=""
-			continue
-		fi
 
-		# Match: "  Volume disk3s2 Macintosh HD (No specific role)"
-		# or     "  Volume disk3s2 Macintosh HD (Role: System)"
-		local vol_disk vol_name vol_role
-		if [[ "$line" =~ ^[[:space:]]+Volume[[:space:]]+(disk[0-9]+s[0-9]+)[[:space:]]+(.+)[[:space:]]+\((.*)\) ]]; then
-			vol_disk="${BASH_REMATCH[1]}"
-			vol_name="${BASH_REMATCH[2]// /}"
-			# Re-extract the name properly (everything between disk id and the final parens)
-			vol_name=$(echo "$line" | sed 's/.*Volume[[:space:]]\+disk[0-9]*s[0-9]*[[:space:]]\+//; s/[[:space:]]\+([^)]*)[[:space:]]*$//')
-			vol_role="${BASH_REMATCH[3]}"
+			# Trust the APFS role metadata – no dslocal check needed here
+			found+=("${_sys_name}|${_data_name}|${_data_disk}")
+			info "  Found: system='${_sys_name}'  data='${_data_name}'  disk='${_data_disk}'" >&2
+			break
+		done
+	done
 
-			if [[ "$vol_role" =~ System ]] || [[ "$vol_role" =~ "No specific role" ]]; then
-				# Confirm it's a system volume by checking for /System on mount
-				if [ -d "/Volumes/$vol_name/System" ]; then
-					current_sys_disk="$vol_disk"
-					current_sys_name="$vol_name"
-				fi
-			elif [[ "$vol_role" =~ Data ]]; then
-				current_data_disk="$vol_disk"
-				current_data_name="$vol_name"
-			fi
-		fi
-	done < <(diskutil apfs list 2>/dev/null)
-
-	# Flush the last container's pair
-	if [ -n "$current_sys_name" ] && [ -n "$current_data_name" ]; then
-		if [ ! -d "/Volumes/$current_data_name" ]; then
-			info "  Mounting data volume '$current_data_name' ($current_data_disk)..." >&2
-			diskutil mount "$current_data_disk" >/dev/null 2>&1
-		fi
-		if [ -d "/Volumes/$current_data_name/private/var/db/dslocal/nodes/Default" ]; then
-			local disk_id
-			disk_id=$(diskutil info "$current_data_disk" 2>/dev/null \
-				| awk '/Device Identifier/ { print $NF }')
-			[ -z "$disk_id" ] && disk_id="$current_data_disk"
-			found+=("${current_sys_name}|${current_data_name}|${disk_id}")
-			info "  Found: system='$current_sys_name'  data='$current_data_name'  disk='$disk_id'" >&2
-		fi
-	fi
-
-	# ── Fallback: /Volumes/ name-based scan if APFS detection found nothing ──
+	# ── Fallback: /Volumes/ name scan if APFS detection found nothing ─────
 	if [ ${#found[@]} -eq 0 ]; then
-		info "  APFS scan found nothing, falling back to /Volumes/ scan..." >&2
-		for vol_path in /Volumes/*/; do
-			[ -d "$vol_path" ] || continue
-			local vol_name
-			vol_name=$(basename "$vol_path")
-			[[ "$vol_name" =~ ^\. ]]       && continue
-			[[ "$vol_name" =~ Recovery ]]  && continue
-			[[ "$vol_name" =~ ^VM$ ]]      && continue
-			[[ "$vol_name" =~ ^Preboot$ ]] && continue
-			[ -d "$vol_path/System" ] || continue
+		info "  APFS scan found nothing, falling back to /Volumes/ name scan..." >&2
+		local _vpath _vname
+		for _vpath in /Volumes/*/; do
+			[ -d "$_vpath" ] || continue
+			_vname=$(basename "$_vpath")
+			[[ "$_vname" =~ ^\. ]]       && continue
+			[[ "$_vname" =~ Recovery ]]  && continue
+			[[ "$_vname" =~ ^VM$ ]]      && continue
+			[[ "$_vname" =~ ^Preboot$ ]] && continue
+			[ -d "$_vpath/System" ]      || continue
 
-			local data_vol="" candidate
-			for candidate in \
-				"/Volumes/${vol_name} - Data" \
-				"/Volumes/${vol_name} Data" \
-				"/Volumes/${vol_name}Data" \
+			local _dv="" _cand
+			for _cand in \
+				"/Volumes/${_vname} - Data" \
+				"/Volumes/${_vname} Data" \
+				"/Volumes/${_vname}Data" \
 				"/Volumes/Data"; do
-				[ -d "$candidate" ] || continue
-				if [ -d "$candidate/private/var/db/dslocal/nodes/Default" ]; then
-					data_vol=$(basename "$candidate")
+				[ -d "$_cand" ] || continue
+				if [ -d "$_cand/private/var/db/dslocal/nodes/Default" ]; then
+					_dv=$(basename "$_cand")
 					break
 				fi
 			done
-			[ -z "$data_vol" ] && continue
+			[ -z "$_dv" ] && continue
 
-			local disk_id
-			disk_id=$(diskutil info "/Volumes/$data_vol" 2>/dev/null \
+			local _did
+			_did=$(diskutil info "/Volumes/$_dv" 2>/dev/null \
 				| awk '/Device Identifier/ { print $NF }')
-			[ -z "$disk_id" ] && disk_id="unknown"
-			found+=("${vol_name}|${data_vol}|${disk_id}")
-			info "  Found: system='$vol_name'  data='$data_vol'  disk='$disk_id'" >&2
+			[ -z "$_did" ] && _did="unknown"
+			found+=("${_vname}|${_dv}|${_did}")
+			info "  Found: system='${_vname}'  data='${_dv}'  disk='${_did}'" >&2
 		done
 	fi
 

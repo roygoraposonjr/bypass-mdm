@@ -255,7 +255,15 @@ select opt in "${options[@]}"; do
 
 		dscl_path="$data_path/private/var/db/dslocal/nodes/Default"
 		if [ ! -d "$dscl_path" ]; then
-			error_exit "Directory Services path does not exist: $dscl_path"
+			error_exit "Directory Services database not found at: $dscl_path
+  
+  This usually means macOS has not completed its first boot yet.
+  The user database is created during the initial post-install startup.
+  
+  Fix: Boot normally into macOS and wait for the Setup Assistant
+  ('Country or Region' screen) to appear -- then stop there and
+  reboot back into Recovery to run this script again.
+  Do NOT proceed through Setup Assistant as it may trigger MDM enrollment."
 		fi
 
 		success "All system paths validated"

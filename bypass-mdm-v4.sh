@@ -106,119 +106,59 @@ find_available_uid() {
 # ─────────────────────────────────────────────────────────────
 # detect_all_installations()
 #
-# Uses `diskutil info` per APFS volume slice to enumerate every
-# container, pairing System volumes with Data volumes by role.
-# Falls back to /Volumes/ name-scanning for non-APFS setups.
-# Prints one record per installation to stdout:
+# Scans /Volumes for every (system_vol, data_vol) pair that
+# looks like a valid macOS installation.
 #
-#   SYSTEM_VOL_NAME|DATA_VOL_NAME|DISK_ID
+# Results are stored directly in the global array: all_installs
+# Each entry has the form:  SYSTEM_VOL_NAME|DATA_VOL_NAME|DISK_ID
 #
-# DISK_ID is the diskutil identifier of the *data* volume.
+# Calling this function in the main process (not a subshell)
+# means error_exit works correctly and array assignment is direct.
 # ─────────────────────────────────────────────────────────────
 detect_all_installations() {
-	local -a found=()
+	info "Scanning /Volumes for macOS installations..."
 
-	info "Scanning APFS volumes for macOS installations..." >&2
+	local _vol _vname _dv _cand _did
 
-	# ── Step 1: collect role/container info for every APFS volume slice ──
-	# diskutil list shows APFS volumes as "APFS Volume" in the synthesized
-	# disk section.  "Apple_APFS" is the container on the physical disk –
-	# NOT the individual volumes – so we must match "APFS Volume" instead.
-	local -a vol_records=()
-	local _disk
-	for _disk in $(diskutil list 2>/dev/null | awk '/APFS Volume/ { print $NF }'); do
-		local _info _name _role _container
-		_info=$(diskutil info "$_disk" 2>/dev/null)
-		[ -z "$_info" ] && continue
-		# Strip all trailing whitespace/CR that would break string comparisons
-		_name=$(printf '%s\n' "$_info"      | awk -F':[[:space:]]+' '/Volume Name/  { print $2 }' | head -1 | tr -d '\r\n' | sed 's/[[:space:]]*$//')
-		_role=$(printf '%s\n' "$_info"      | awk -F':[[:space:]]+' '/APFS Role/    { print $2 }' | head -1 | tr -d '\r\n' | sed 's/[[:space:]]*$//')
-		_container=$(printf '%s\n' "$_info" | awk -F':[[:space:]]+' '/Part of Whole/{ print $2 }' | head -1 | tr -d '\r\n' | sed 's/[[:space:]]*$//')
-		[ -z "$_name" ] || [ -z "$_container" ] && continue
-		vol_records+=("${_disk}|${_name}|${_role}|${_container}")
-		info "  Volume: ${_name}  role='${_role}'  container='${_container}'" >&2
-	done
+	for _vol in /Volumes/*; do
+		[ -d "$_vol" ] || continue
+		_vname=$(basename "$_vol")
 
-	# ── Step 2: pair each System volume with its Data volume ─────────────
-	local _sys_rec
-	for _sys_rec in "${vol_records[@]}"; do
-		IFS='|' read -r _sys_disk _sys_name _sys_role _sys_cont <<< "$_sys_rec"
-		# For explicit "System" role: trust the APFS metadata directly.
-		# The system volume is often NOT mounted in Recovery, so we cannot
-		# rely on checking for /Volumes/<name>/System.
-		# For "No specific role": only accept if the volume IS mounted with /System.
-		if [[ "$_sys_role" == *"System"* ]]; then
-			: # Trust the role – no mount check
-		elif [[ "$_sys_role" == *"No specific role"* ]]; then
-			[ -d "/Volumes/${_sys_name}/System" ] || continue
-		else
-			continue
-		fi
+		# Skip obvious non-system volumes
+		case "$_vname" in
+			.*|*Recovery*|VM|Preboot) continue ;;
+		esac
+		[[ "$_vname" == *" - Data" ]] && continue
+		[[ "$_vname" == *Data      ]] && continue
 
-		local _data_rec
-		for _data_rec in "${vol_records[@]}"; do
-			IFS='|' read -r _data_disk _data_name _data_role _data_cont <<< "$_data_rec"
-			[[ "$_data_role" != *"Data"* ]]    && continue
-			[ "$_data_cont" = "$_sys_cont" ]   || continue
+		# Must have a /System directory to qualify as a system volume
+		[ -d "$_vol/System" ] || continue
 
-			# Mount the data volume if it is not already mounted
-			if [ ! -d "/Volumes/${_data_name}" ]; then
-				info "  Mounting '${_data_name}' (${_data_disk})..." >&2
-				diskutil mount "$_data_disk" >/dev/null 2>&1
+		# Find the paired data volume – accept any mounted directory
+		_dv=""
+		for _cand in \
+			"/Volumes/${_vname} - Data" \
+			"/Volumes/${_vname} Data" \
+			"/Volumes/${_vname}Data" \
+			"/Volumes/Data"; do
+			if [ -d "$_cand" ]; then
+				_dv=$(basename "$_cand")
+				break
 			fi
-
-			# Trust the APFS role metadata – no dslocal check needed here
-			found+=("${_sys_name}|${_data_name}|${_data_disk}")
-			info "  Found: system='${_sys_name}'  data='${_data_name}'  disk='${_data_disk}'" >&2
-			break
 		done
+		[ -z "$_dv" ] && continue
+
+		_did=$(diskutil info "/Volumes/$_dv" 2>/dev/null \
+			| awk '/Device Identifier/ { print $NF }')
+		[ -z "$_did" ] && _did="unknown"
+
+		all_installs+=("${_vname}|${_dv}|${_did}")
+		info "  Found: system='${_vname}'  data='${_dv}'  disk='${_did}'"
 	done
 
-	# ── Fallback: /Volumes/ name scan if APFS detection found nothing ─────
-	if [ ${#found[@]} -eq 0 ]; then
-		info "  APFS scan found nothing, falling back to /Volumes/ name scan..." >&2
-		local _vpath _vname
-		for _vpath in /Volumes/*/; do
-			[ -d "$_vpath" ] || continue
-			_vname=$(basename "$_vpath")
-			[[ "$_vname" =~ ^\. ]]       && continue
-			[[ "$_vname" =~ Recovery ]]  && continue
-			[[ "$_vname" =~ ^VM$ ]]      && continue
-			[[ "$_vname" =~ ^Preboot$ ]] && continue
-			[ -d "$_vpath/System" ]      || continue
-
-			local _dv="" _cand
-			for _cand in \
-				"/Volumes/${_vname} - Data" \
-				"/Volumes/${_vname} Data" \
-				"/Volumes/${_vname}Data" \
-				"/Volumes/Data"; do
-				[ -d "$_cand" ] || continue
-				if [ -d "$_cand/private/var/db/dslocal/nodes/Default" ]; then
-					_dv=$(basename "$_cand")
-					break
-				fi
-			done
-			[ -z "$_dv" ] && continue
-
-			local _did
-			_did=$(diskutil info "/Volumes/$_dv" 2>/dev/null \
-				| awk '/Device Identifier/ { print $NF }')
-			[ -z "$_did" ] && _did="unknown"
-			found+=("${_vname}|${_dv}|${_did}")
-			info "  Found: system='${_vname}'  data='${_dv}'  disk='${_did}'" >&2
-		done
+	if [ ${#all_installs[@]} -eq 0 ]; then
+		error_exit "No macOS installation found. Make sure you are in Recovery mode with at least one macOS volume mounted."
 	fi
-
-	if [ ${#found[@]} -eq 0 ]; then
-		# Signal failure via sentinel (error_exit would only kill the subshell)
-		echo -e "${RED}ERROR: No macOS installation found.${NC}" >&2
-		echo -e "${RED}Make sure you are in Recovery mode with volumes mounted.${NC}" >&2
-		echo "__NO_INSTALL__"
-		return 1
-	fi
-
-	printf '%s\n' "${found[@]}"
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -235,23 +175,23 @@ select_installation() {
 
 	if [ "$count" -eq 1 ]; then
 		IFS='|' read -r system_volume data_volume disk_id <<< "${installs[0]}"
-		info "Single installation detected – auto-selected." >&2
+		info "Single installation detected – auto-selected."
 		return
 	fi
 
-	echo "" >&2
-	echo -e "${YEL}╔══════════════════════════════════════════════════════╗${NC}" >&2
-	echo -e "${YEL}║  Multiple macOS installations detected               ║${NC}" >&2
-	echo -e "${YEL}║  Please choose the one you want to bypass MDM on:    ║${NC}" >&2
-	echo -e "${YEL}╚══════════════════════════════════════════════════════╝${NC}" >&2
-	echo "" >&2
+	echo ""
+	echo -e "${YEL}╔══════════════════════════════════════════════════════╗${NC}"
+	echo -e "${YEL}║  Multiple macOS installations detected               ║${NC}"
+	echo -e "${YEL}║  Please choose the one you want to bypass MDM on:    ║${NC}"
+	echo -e "${YEL}╚══════════════════════════════════════════════════════╝${NC}"
+	echo ""
 
 	local i=1
 	for entry in "${installs[@]}"; do
 		IFS='|' read -r sv dv di <<< "$entry"
-		printf "  ${CYAN}[%d]${NC}  System Volume : ${GRN}%s${NC}\n" "$i" "$sv" >&2
-		printf "       Data Volume   : ${GRN}%s${NC}\n" "$dv" >&2
-		printf "       Disk ID       : ${PUR}%s${NC}\n\n" "$di" >&2
+		printf "  ${CYAN}[%d]${NC}  System Volume : ${GRN}%s${NC}\n" "$i" "$sv"
+		printf "       Data Volume   : ${GRN}%s${NC}\n" "$dv"
+		printf "       Disk ID       : ${PUR}%s${NC}\n\n" "$di"
 		i=$((i + 1))
 	done
 
@@ -261,28 +201,20 @@ select_installation() {
 		if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "$count" ]; then
 			break
 		fi
-		warn "Invalid choice. Please enter a number between 1 and ${count}." >&2
+		warn "Invalid choice. Please enter a number between 1 and ${count}."
 	done
 
 	IFS='|' read -r system_volume data_volume disk_id <<< "${installs[$((choice - 1))]}"
 }
 
 # ─── Detect all installations and let the user pick ──────────
-# Note: mapfile requires bash 4+; macOS Recovery uses bash 3.2,
-# so we use a while-read loop which works on all bash versions.
+# NOTE: detect_all_installations is called in the MAIN process,
+# not a subshell. This means:
+#   • it populates all_installs directly (no capture needed)
+#   • error_exit actually terminates the script
+#   • no mapfile / process substitution / while-read tricks needed
 all_installs=()
-while IFS= read -r _ai_line; do
-	all_installs+=("$_ai_line")
-done < <(detect_all_installations)
-
-# Guard: the function runs in a subshell – error_exit/exit there
-# cannot terminate the parent.  Check for empty result or sentinel.
-if [ ${#all_installs[@]} -eq 0 ] || [ "${all_installs[0]}" = "__NO_INSTALL__" ]; then
-	echo -e "${RED}ERROR: No macOS installation found.${NC}" >&2
-	echo -e "${RED}Make sure you are in Recovery mode with at least one macOS volume mounted.${NC}" >&2
-	exit 1
-fi
-
+detect_all_installations
 select_installation "${all_installs[@]}"
 
 # Display header

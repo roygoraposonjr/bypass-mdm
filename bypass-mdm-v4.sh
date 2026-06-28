@@ -120,26 +120,18 @@ find_available_uid() {
 detect_all_installations() {
 	local -a found=()
 
-	info "Scanning for macOS installations..." >&2
-
-	# ── Build a map of all mounted APFS volumes via diskutil ──────────────
-	# This is more reliable than relying solely on /Volumes/ name heuristics.
-	local -a all_disk_ids=()
-	mapfile -t all_disk_ids < <(diskutil list 2>/dev/null \
-		| awk '/APFS Volume/ { print $NF }')
+	info "Scanning /Volumes for macOS installations..." >&2
 
 	for vol_path in /Volumes/*/; do
 		[ -d "$vol_path" ] || continue
 		vol_name=$(basename "$vol_path")
 
 		# Skip obvious non-system volumes
-		[[ "$vol_name" =~ ^\. ]]       && continue
-		[[ "$vol_name" =~ Recovery ]]  && continue
-		[[ "$vol_name" =~ ^VM$ ]]      && continue
+		[[ "$vol_name" =~ ^\. ]]      && continue
+		[[ "$vol_name" =~ Recovery ]] && continue
+		[[ "$vol_name" =~ ^VM$ ]]     && continue
 		[[ "$vol_name" =~ ^Preboot$ ]] && continue
-		[[ "$vol_name" =~ Data$ ]]     && continue   # data volumes handled below
-		[[ "$vol_name" =~ -Data$ ]]    && continue
-		[[ "$vol_name" =~ \ Data$ ]]   && continue
+		[[ "$vol_name" =~ Data$ ]]    && continue   # data volumes handled below
 
 		# Must have a /System directory to qualify as a system volume
 		[ -d "$vol_path/System" ] || continue
@@ -148,34 +140,30 @@ detect_all_installations() {
 		local data_vol=""
 		local candidate
 
-		# Priority 1 – "<system_vol> - Data" (most common naming on modern macOS)
-		for candidate in \
-			"/Volumes/${vol_name} - Data" \
-			"/Volumes/${vol_name} Data" \
-			"/Volumes/${vol_name}Data" \
-			"/Volumes/${vol_name}-Data"; do
-			if [ -d "$candidate/private/var/db/dslocal/nodes/Default" ]; then
-				data_vol=$(basename "$candidate")
-				break
-			fi
-		done
-
-		# Priority 2 – exact "Data" volume with dslocal node
-		if [ -z "$data_vol" ] && \
-		   [ -d "/Volumes/Data/private/var/db/dslocal/nodes/Default" ]; then
+		# Priority 1 – exact "Data" volume with dslocal node
+		if [ -d "/Volumes/Data/private/var/db/dslocal/nodes/Default" ]; then
 			data_vol="Data"
 		fi
 
-		# Priority 3 – any mounted volume with dslocal (catch-all)
+		# Priority 2 – "<system_vol> Data" / "<system_vol> - Data" / "<system_vol>Data"
 		if [ -z "$data_vol" ]; then
-			for candidate in /Volumes/*/; do
-				[ -d "$candidate" ] || continue
-				cand_name=$(basename "$candidate")
-				# Skip if it looks like a system volume itself
-				[[ "$cand_name" == "$vol_name" ]] && continue
-				[ -d "$candidate/System" ] && continue
+			for candidate in \
+				"/Volumes/${vol_name} Data" \
+				"/Volumes/${vol_name} - Data" \
+				"/Volumes/${vol_name}Data"; do
 				if [ -d "$candidate/private/var/db/dslocal/nodes/Default" ]; then
-					data_vol="$cand_name"
+					data_vol=$(basename "$candidate")
+					break
+				fi
+			done
+		fi
+
+		# Priority 3 – any sibling volume ending with "Data" that has dslocal
+		if [ -z "$data_vol" ]; then
+			for candidate in "/Volumes/"*Data "/Volumes/"*" Data" "/Volumes/"*"-Data"; do
+				[ -d "$candidate" ] || continue
+				if [ -d "$candidate/private/var/db/dslocal/nodes/Default" ]; then
+					data_vol=$(basename "$candidate")
 					break
 				fi
 			done
@@ -194,11 +182,7 @@ detect_all_installations() {
 	done
 
 	if [ ${#found[@]} -eq 0 ]; then
-		# Print error to stderr and signal failure via a sentinel on stdout
-		echo -e "${RED}ERROR: No macOS installation found. Make sure you are in Recovery" >&2
-		echo -e "mode with at least one macOS volume mounted.${NC}" >&2
-		echo "__ERROR__"
-		return 1
+		error_exit "No macOS installation found. Make sure you are in Recovery mode with at least one macOS volume mounted."
 	fi
 
 	printf '%s\n' "${found[@]}"
@@ -252,15 +236,6 @@ select_installation() {
 
 # ─── Detect all installations and let the user pick ──────────
 mapfile -t all_installs < <(detect_all_installations)
-
-# Guard: detect_all_installations runs in a subshell so error_exit cannot
-# kill the parent process.  Check for the sentinel value or empty output.
-if [ ${#all_installs[@]} -eq 0 ] || [ "${all_installs[0]}" = "__ERROR__" ]; then
-	echo -e "${RED}ERROR: No macOS installation found.${NC}" \
-		"Make sure you are in Recovery mode with at least one macOS volume mounted." >&2
-	exit 1
-fi
-
 select_installation "${all_installs[@]}"
 
 # Display header

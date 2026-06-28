@@ -4,25 +4,26 @@
 
 A script to bypass Mobile Device Management (MDM) enrollment during macOS setup.
 
-## 🚨 Update: February 3, 2026
+## 🚨 Update: June 28, 2026
 
-**Version 2 Now Available!** Due to the high number of requests and repreated issues reported, I've released a new version of the script with significant improvements:
+**Version 4 Now Available!** This fork introduces full external storage support and multi-installation detection — fixing the issue where v3 would silently target the internal drive even when an external drive was intended.
 
-### What's New in v2:
+### What's New in v4:
 
-- **Automatic Volume Detection** - No longer requires specific volume names like "Macintosh HD"
-- **Comprehensive Error Handling** - Clear error messages and validation at every step
-- **Input Validation** - Validates usernames and passwords to prevent common mistakes
-- **UID Conflict Detection** - Automatically finds available UIDs to avoid conflicts
-- **Better User Experience** - Color-coded output, progress indicators, and helpful feedback
+- **🖥️ External Storage Support** - Works on both internal and external macOS installations
+- **🔎 Multi-Installation Detection** - Scans all mounted volumes and presents a numbered menu when multiple macOS installations are detected, showing System Volume, Data Volume, and Disk ID (e.g. `disk2s5`) so you can tell internal from external
+- **⚡ Auto-Select for Single Installs** - If only one installation is found, it is selected automatically — no extra prompt
+- **🚫 No Volume Renaming** - Removed the unreliable auto-rename of data volumes that could cause conflicts when multiple installs were present
+- **✅ Correct Home Directory** - User home folder is always created on the chosen installation's data volume, not the internal drive
 
-The instructions below use **v2 by default** (recommended). If you experience issues, you can still use the original version by replacing `bypass-mdm-v2.sh` with `bypass-mdm.sh` in the commands.
+> The instructions below use **v4 by default** (recommended). You can use an older version by replacing `bypass-mdm-v4.sh` in the commands.
 
 ---
 
 ## ✨ Features
 
-- **🔍 Smart Volume Detection** - Automatically detects system and data volumes regardless of custom names
+- **🔍 Smart Volume Detection** - Automatically detects all macOS system and data volumes, including on external drives
+- **🖥️ Multi-Installation Selection** - Prompts you to choose when more than one macOS installation is found
 - **✅ Input Validation** - Validates usernames and passwords to prevent common errors
 - **🛡️ Comprehensive Error Handling** - Clear error messages guide you through any issues
 - **🎯 UID Conflict Resolution** - Automatically finds available user IDs to avoid conflicts
@@ -33,7 +34,8 @@ The instructions below use **v2 by default** (recommended). If you experience is
 
 - **It is strongly recommended to erase the hard drive prior to starting**
 - **It is recommended to reinstall macOS using an external flash drive**
-- **English language recommended** (not required for v2, but recommended)
+- **English language recommended**
+- **If targeting an external drive:** make sure it is connected and mounted before running the script
 
 ## 📋 Installation & Usage
 
@@ -57,20 +59,46 @@ Follow these steps to bypass MDM enrollment during a fresh macOS installation:
 - Click **Utilities** in the menu bar
 - Select **Terminal**
 
-**5.** **Run the bypass script** - Copy and paste this command into Terminal:
+**5.** *(External drive only)* **Mount your external drive** if it isn't already visible in Disk Utility:
 
 ```bash
-curl -L https://raw.githubusercontent.com/assafdori/bypass-mdm/main/bypass-mdm-v2.sh -o bypass-mdm.sh && chmod +x ./bypass-mdm.sh && ./bypass-mdm.sh
+diskutil list          # find your external disk identifier (e.g. disk2)
+diskutil mountDisk disk2
 ```
 
-**6.** **Volume Detection** - The script will automatically detect your volumes:
+**6.** **Run the bypass script** - Copy and paste this command into Terminal:
 
-- System Volume (e.g., "Macintosh HD", "MacOS", or your custom name)
-- Data Volume (e.g., "Data", "Macintosh HD - Data", or your custom name)
+```bash
+curl -L https://raw.githubusercontent.com/roygoraposonjr/bypass-mdm/main/bypass-mdm-v4.sh -o bypass-mdm.sh && chmod +x ./bypass-mdm.sh && ./bypass-mdm.sh
+```
 
-**7.** **Select Option 1** - "Bypass MDM from Recovery"
+**7.** **Volume Detection** - The script will automatically scan all mounted volumes:
 
-**8.** **Create Temporary User** - Configure the admin account (or press Enter for defaults):
+- If **one** macOS installation is found → it is selected automatically
+- If **multiple** installations are found → you will see a selection menu like this:
+
+```
+╔══════════════════════════════════════════════════════╗
+║  Multiple macOS installations detected               ║
+║  Please choose the one you want to bypass MDM on:    ║
+╚══════════════════════════════════════════════════════╝
+
+  [1]  System Volume : Macintosh HD
+       Data Volume   : Macintosh HD - Data
+       Disk ID       : disk1s1
+
+  [2]  System Volume : ExternalMac
+       Data Volume   : ExternalMac - Data
+       Disk ID       : disk2s1
+
+Enter the number of the installation to target [1-2]:
+```
+
+Use the **Disk ID** to identify internal (`disk0` / `disk1`) vs external (`disk2`, `disk3`, etc.) drives.
+
+**8.** **Select Option 1** - "Bypass MDM from Recovery"
+
+**9.** **Create Temporary User** - Configure the admin account (or press Enter for defaults):
 
 - **Fullname**: Apple (default)
 - **Username**: Apple (default)
@@ -78,41 +106,41 @@ curl -L https://raw.githubusercontent.com/assafdori/bypass-mdm/main/bypass-mdm-v
 
 > 💡 **Tip:** The script validates your input and will prompt you to retry if there are issues
 
-**9.** **Wait for Completion** - You'll see progress messages:
+**10.** **Wait for Completion** - You'll see progress messages:
 
 - ✓ Validating system paths
 - ✓ Creating user account
 - ✓ Blocking MDM domains
 - ✓ Configuring MDM bypass settings
 
-**10.** **Reboot** - When you see "MDM Bypass Completed Successfully", close Terminal and reboot
+**11.** **Reboot** - When you see "MDM Bypass Completed Successfully", close Terminal and reboot
 
 ---
 
 ### 🔄 Post-Installation Steps
 
-**11.** **Login** with the temporary account:
+**12.** **Login** with the temporary account:
 
 - Username: `Apple` (or your custom username)
 - Password: `1234` (or your custom password)
 
-**12.** **Skip Setup** - Skip all prompts (Apple ID, Siri, Touch ID, Location Services)
+**13.** **Skip Setup** - Skip all prompts (Apple ID, Siri, Touch ID, Location Services)
 
-**13.** **Create Real Account:**
+**14.** **Create Real Account:**
 
 - Navigate to **System Settings > Users and Groups**
 - Create your actual Admin account with your preferred credentials
 
-**14.** **Switch Accounts** - Log out and sign in to your new account
+**15.** **Switch Accounts** - Log out and sign in to your new account
 
-**15.** **Setup Properly** - Now configure Apple ID, Siri, Touch ID, etc.
+**16.** **Setup Properly** - Now configure Apple ID, Siri, Touch ID, etc.
 
-**16.** **Clean Up** - Delete the temporary Apple profile:
+**17.** **Clean Up** - Delete the temporary Apple profile:
 
 - Go to **System Settings > Users and Groups**
 - Select the Apple profile and click the minus (−) button
 
-**17.** **🎉 Done!** You're MDM free!
+**18.** **🎉 Done!** You're MDM free!
 
 ---
 
@@ -127,11 +155,20 @@ curl -L https://raw.githubusercontent.com/assafdori/bypass-mdm/main/bypass-mdm-v
 - Ensure you're in Recovery Mode (not booted into macOS normally)
 - Verify macOS is installed on your drive
 - Check your drive is visible in Disk Utility
-- Try the original version (legacy, hardcoded volume names):
+- For external drives, make sure the drive is mounted (`diskutil mountDisk diskX`)
+- Try an older version:
 
 ```bash
-curl -L https://raw.githubusercontent.com/assafdori/bypass-mdm/main/bypass-mdm.sh -o bypass-mdm.sh && chmod +x ./bypass-mdm.sh && ./bypass-mdm.sh
+curl -L https://raw.githubusercontent.com/roygoraposonjr/bypass-mdm/main/bypass-mdm-v3.sh -o bypass-mdm.sh && chmod +x ./bypass-mdm.sh && ./bypass-mdm.sh
 ```
+
+### `mapfile` / bash version error
+
+**Problem:** Script exits immediately with a `mapfile` error
+
+**Cause:** macOS Recovery ships with bash 3.2 which does not support `mapfile`
+
+**Solution:** Run bash explicitly with a newer version if available, or use v3 as a fallback.
 
 ### Permission Errors
 
@@ -171,28 +208,14 @@ chmod +x bypass-mdm.sh
 
 ## 📦 Version Information
 
-| Version            | Description                                       | Status             |
-| ------------------ | ------------------------------------------------- | ------------------ |
-| `bypass-mdm-v2.sh` | Enhanced version with auto-detection & validation | ✅ **Recommended** |
-| `bypass-mdm.sh`    | Original version with hardcoded volume names      | ⚠️ Legacy          |
+| Version             | Description                                                         | Status              |
+| ------------------- | ------------------------------------------------------------------- | ------------------- |
+| `bypass-mdm-v4.sh`  | External storage support, multi-installation selection, no rename   | ✅ **Recommended**  |
+| `bypass-mdm-v3.sh`  | Enhanced auto-detection & validation (internal drive only)          | ⚠️ Previous         |
+| `bypass-mdm-v2.sh`  | Original auto-detection version                                     | ⚠️ Legacy           |
+| `bypass-mdm.sh`     | Original version with hardcoded volume names                        | ⚠️ Legacy           |
 
-### ❤️ Optional Contributions
-
-Many people have reached out asking how to say thank you for saving their Mac. **This is completely optional and not expected!** If you'd like to contribute, crypto donations are appreciated.
-
-People have forked this repository and put the script behind a pay-wall. I do not care at all. Once again, crypto contributions are not expected, but feel free if you want to.
-
-**Bitcoin (BTC):**
-
-```
-bc1qzguh4908r7wguz20ylzeggya9d38t6hega5ppf
-```
-
-**Monero (XMR):**
-
-```
-45RnFseY4gNZv58DvShz2KJEbx1EyaTtaMCDnU5th21KbRThWurjjK6iugEdq9wfc4Kbw3a7AAyqo6WnEmL1StAMJur8QJp
-```
+---
 
 ## ⚖️ Legal Disclaimer
 
@@ -205,3 +228,5 @@ bc1qzguh4908r7wguz20ylzeggya9d38t6hega5ppf
 ## 📄 License
 
 This project is provided as-is for educational purposes. Use at your own discretion.
+
+> Originally by [Assaf Dori](https://assafdori.com). Extended with external storage support by [roygoraposonjr](https://github.com/roygoraposonjr/bypass-mdm).

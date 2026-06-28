@@ -121,11 +121,12 @@ detect_all_installations() {
 	info "Scanning APFS volumes for macOS installations..." >&2
 
 	# ── Step 1: collect role/container info for every APFS volume slice ──
-	# Using `diskutil info` per-slice avoids parsing the complex
-	# `diskutil apfs list` table (which includes UUIDs that break regex).
+	# diskutil list shows APFS volumes as "APFS Volume" in the synthesized
+	# disk section.  "Apple_APFS" is the container on the physical disk –
+	# NOT the individual volumes – so we must match "APFS Volume" instead.
 	local -a vol_records=()
 	local _disk
-	for _disk in $(diskutil list 2>/dev/null | awk '/Apple_APFS / { print $NF }'); do
+	for _disk in $(diskutil list 2>/dev/null | awk '/APFS Volume/ { print $NF }'); do
 		local _info _name _role _container
 		_info=$(diskutil info "$_disk" 2>/dev/null)
 		[ -z "$_info" ] && continue
@@ -134,16 +135,24 @@ detect_all_installations() {
 		_container=$(printf '%s\n' "$_info" | awk -F':[[:space:]]+' '/Part of Whole/{ print $2 }' | head -1)
 		[ -z "$_name" ] || [ -z "$_container" ] && continue
 		vol_records+=("${_disk}|${_name}|${_role}|${_container}")
+		info "  Volume: ${_name}  role='${_role}'  container='${_container}'" >&2
 	done
 
 	# ── Step 2: pair each System volume with its Data volume ─────────────
 	local _sys_rec
 	for _sys_rec in "${vol_records[@]}"; do
 		IFS='|' read -r _sys_disk _sys_name _sys_role _sys_cont <<< "$_sys_rec"
-		# Accept "System" role or "No specific role" (older macOS)
-		[[ "$_sys_role" != *"System"* ]] && [[ "$_sys_role" != *"No specific role"* ]] && continue
-		# Confirm by checking for a /System directory
-		[ -d "/Volumes/${_sys_name}/System" ] || continue
+		# For explicit "System" role: trust the APFS metadata directly.
+		# The system volume is often NOT mounted in Recovery, so we cannot
+		# rely on checking for /Volumes/<name>/System.
+		# For "No specific role": only accept if the volume IS mounted with /System.
+		if [[ "$_sys_role" == *"System"* ]]; then
+			: # Trust the role – no mount check
+		elif [[ "$_sys_role" == *"No specific role"* ]]; then
+			[ -d "/Volumes/${_sys_name}/System" ] || continue
+		else
+			continue
+		fi
 
 		local _data_rec
 		for _data_rec in "${vol_records[@]}"; do

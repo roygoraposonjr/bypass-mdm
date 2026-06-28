@@ -106,83 +106,133 @@ find_available_uid() {
 # ─────────────────────────────────────────────────────────────
 # detect_all_installations()
 #
-# Scans /Volumes for every (system_vol, data_vol) pair that
-# looks like a valid macOS installation, including volumes on
-# external drives.  Prints one record per installation to
-# stdout in the form:
+# Uses `diskutil apfs list` to enumerate every APFS container
+# and pair System volumes with their Data volumes by role.
+# Falls back to /Volumes/ name-scanning for non-APFS setups.
+# Prints one record per installation to stdout:
 #
 #   SYSTEM_VOL_NAME|DATA_VOL_NAME|DISK_ID
 #
-# DISK_ID is the diskutil identifier of the *data* volume
-# (e.g. disk2s5) and is used only for display so the user can
-# distinguish internal from external hardware.
+# DISK_ID is the diskutil identifier of the *data* volume.
 # ─────────────────────────────────────────────────────────────
 detect_all_installations() {
 	local -a found=()
 
-	info "Scanning /Volumes for macOS installations..." >&2
+	info "Scanning APFS containers for macOS installations..." >&2
 
-	for vol_path in /Volumes/*/; do
-		[ -d "$vol_path" ] || continue
-		vol_name=$(basename "$vol_path")
+	# ── Parse every APFS container with diskutil apfs list ───────────
+	# This reliably finds volumes by role regardless of their display name.
+	local current_sys_disk="" current_sys_name=""
+	local current_data_disk="" current_data_name=""
 
-		# Skip obvious non-system volumes
-		[[ "$vol_name" =~ ^\. ]]      && continue
-		[[ "$vol_name" =~ Recovery ]] && continue
-		[[ "$vol_name" =~ ^VM$ ]]     && continue
-		[[ "$vol_name" =~ ^Preboot$ ]] && continue
-		[[ "$vol_name" =~ Data$ ]]    && continue   # data volumes handled below
-
-		# Must have a /System directory to qualify as a system volume
-		[ -d "$vol_path/System" ] || continue
-
-		# ── Find the paired Data volume ──────────────────────────
-		local data_vol=""
-		local candidate
-
-		# Priority 1 – exact "Data" volume with dslocal node
-		if [ -d "/Volumes/Data/private/var/db/dslocal/nodes/Default" ]; then
-			data_vol="Data"
-		fi
-
-		# Priority 2 – "<system_vol> Data" / "<system_vol> - Data" / "<system_vol>Data"
-		if [ -z "$data_vol" ]; then
-			for candidate in \
-				"/Volumes/${vol_name} Data" \
-				"/Volumes/${vol_name} - Data" \
-				"/Volumes/${vol_name}Data"; do
-				if [ -d "$candidate/private/var/db/dslocal/nodes/Default" ]; then
-					data_vol=$(basename "$candidate")
-					break
+	# We process the output line by line, tracking System+Data pairs
+	# within the same APFS container.
+	while IFS= read -r line; do
+		# Detect a new APFS Container boundary – flush any pending pair
+		if [[ "$line" =~ "APFS Container" ]]; then
+			# Flush previous container's pair if complete
+			if [ -n "$current_sys_name" ] && [ -n "$current_data_name" ]; then
+				# Ensure data volume is mounted
+				if [ ! -d "/Volumes/$current_data_name" ]; then
+					info "  Mounting data volume '$current_data_name' ($current_data_disk)..." >&2
+					diskutil mount "$current_data_disk" >/dev/null 2>&1
 				fi
-			done
+				# Verify dslocal exists after mount
+				if [ -d "/Volumes/$current_data_name/private/var/db/dslocal/nodes/Default" ]; then
+					local disk_id
+					disk_id=$(diskutil info "$current_data_disk" 2>/dev/null \
+						| awk '/Device Identifier/ { print $NF }')
+					[ -z "$disk_id" ] && disk_id="$current_data_disk"
+					found+=("${current_sys_name}|${current_data_name}|${disk_id}")
+					info "  Found: system='$current_sys_name'  data='$current_data_name'  disk='$disk_id'" >&2
+				fi
+			fi
+			current_sys_disk=""; current_sys_name=""
+			current_data_disk=""; current_data_name=""
+			continue
 		fi
 
-		# Priority 3 – any sibling volume ending with "Data" that has dslocal
-		if [ -z "$data_vol" ]; then
-			for candidate in "/Volumes/"*Data "/Volumes/"*" Data" "/Volumes/"*"-Data"; do
+		# Match: "  Volume disk3s2 Macintosh HD (No specific role)"
+		# or     "  Volume disk3s2 Macintosh HD (Role: System)"
+		local vol_disk vol_name vol_role
+		if [[ "$line" =~ ^[[:space:]]+Volume[[:space:]]+(disk[0-9]+s[0-9]+)[[:space:]]+(.+)[[:space:]]+\((.*)\) ]]; then
+			vol_disk="${BASH_REMATCH[1]}"
+			vol_name="${BASH_REMATCH[2]// /}"
+			# Re-extract the name properly (everything between disk id and the final parens)
+			vol_name=$(echo "$line" | sed 's/.*Volume[[:space:]]\+disk[0-9]*s[0-9]*[[:space:]]\+//; s/[[:space:]]\+([^)]*)[[:space:]]*$//')
+			vol_role="${BASH_REMATCH[3]}"
+
+			if [[ "$vol_role" =~ System ]] || [[ "$vol_role" =~ "No specific role" ]]; then
+				# Confirm it's a system volume by checking for /System on mount
+				if [ -d "/Volumes/$vol_name/System" ]; then
+					current_sys_disk="$vol_disk"
+					current_sys_name="$vol_name"
+				fi
+			elif [[ "$vol_role" =~ Data ]]; then
+				current_data_disk="$vol_disk"
+				current_data_name="$vol_name"
+			fi
+		fi
+	done < <(diskutil apfs list 2>/dev/null)
+
+	# Flush the last container's pair
+	if [ -n "$current_sys_name" ] && [ -n "$current_data_name" ]; then
+		if [ ! -d "/Volumes/$current_data_name" ]; then
+			info "  Mounting data volume '$current_data_name' ($current_data_disk)..." >&2
+			diskutil mount "$current_data_disk" >/dev/null 2>&1
+		fi
+		if [ -d "/Volumes/$current_data_name/private/var/db/dslocal/nodes/Default" ]; then
+			local disk_id
+			disk_id=$(diskutil info "$current_data_disk" 2>/dev/null \
+				| awk '/Device Identifier/ { print $NF }')
+			[ -z "$disk_id" ] && disk_id="$current_data_disk"
+			found+=("${current_sys_name}|${current_data_name}|${disk_id}")
+			info "  Found: system='$current_sys_name'  data='$current_data_name'  disk='$disk_id'" >&2
+		fi
+	fi
+
+	# ── Fallback: /Volumes/ name-based scan if APFS detection found nothing ──
+	if [ ${#found[@]} -eq 0 ]; then
+		info "  APFS scan found nothing, falling back to /Volumes/ scan..." >&2
+		for vol_path in /Volumes/*/; do
+			[ -d "$vol_path" ] || continue
+			local vol_name
+			vol_name=$(basename "$vol_path")
+			[[ "$vol_name" =~ ^\. ]]       && continue
+			[[ "$vol_name" =~ Recovery ]]  && continue
+			[[ "$vol_name" =~ ^VM$ ]]      && continue
+			[[ "$vol_name" =~ ^Preboot$ ]] && continue
+			[ -d "$vol_path/System" ] || continue
+
+			local data_vol="" candidate
+			for candidate in \
+				"/Volumes/${vol_name} - Data" \
+				"/Volumes/${vol_name} Data" \
+				"/Volumes/${vol_name}Data" \
+				"/Volumes/Data"; do
 				[ -d "$candidate" ] || continue
 				if [ -d "$candidate/private/var/db/dslocal/nodes/Default" ]; then
 					data_vol=$(basename "$candidate")
 					break
 				fi
 			done
-		fi
+			[ -z "$data_vol" ] && continue
 
-		[ -z "$data_vol" ] && continue   # no usable data volume found → skip
-
-		# ── Get a disk identifier for the data volume (best-effort) ──
-		local disk_id
-		disk_id=$(diskutil info "/Volumes/$data_vol" 2>/dev/null \
-			| awk '/Device Identifier/ { print $NF }')
-		[ -z "$disk_id" ] && disk_id="unknown"
-
-		found+=("${vol_name}|${data_vol}|${disk_id}")
-		info "  Found: system='$vol_name'  data='$data_vol'  disk='$disk_id'" >&2
-	done
+			local disk_id
+			disk_id=$(diskutil info "/Volumes/$data_vol" 2>/dev/null \
+				| awk '/Device Identifier/ { print $NF }')
+			[ -z "$disk_id" ] && disk_id="unknown"
+			found+=("${vol_name}|${data_vol}|${disk_id}")
+			info "  Found: system='$vol_name'  data='$data_vol'  disk='$disk_id'" >&2
+		done
+	fi
 
 	if [ ${#found[@]} -eq 0 ]; then
-		error_exit "No macOS installation found. Make sure you are in Recovery mode with at least one macOS volume mounted."
+		# Signal failure via sentinel (error_exit would only kill the subshell)
+		echo -e "${RED}ERROR: No macOS installation found.${NC}" >&2
+		echo -e "${RED}Make sure you are in Recovery mode with volumes mounted.${NC}" >&2
+		echo "__NO_INSTALL__"
+		return 1
 	fi
 
 	printf '%s\n' "${found[@]}"
@@ -236,6 +286,15 @@ select_installation() {
 
 # ─── Detect all installations and let the user pick ──────────
 mapfile -t all_installs < <(detect_all_installations)
+
+# Guard: the function runs in a subshell – error_exit/exit there
+# cannot terminate the parent.  Check for empty result or sentinel.
+if [ ${#all_installs[@]} -eq 0 ] || [ "${all_installs[0]}" = "__NO_INSTALL__" ]; then
+	echo -e "${RED}ERROR: No macOS installation found.${NC}" >&2
+	echo -e "${RED}Make sure you are in Recovery mode with at least one macOS volume mounted.${NC}" >&2
+	exit 1
+fi
+
 select_installation "${all_installs[@]}"
 
 # Display header

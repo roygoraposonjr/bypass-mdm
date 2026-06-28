@@ -258,7 +258,12 @@ select_installation() {
 }
 
 # ─── Detect all installations and let the user pick ──────────
-mapfile -t all_installs < <(detect_all_installations)
+# Note: mapfile requires bash 4+; macOS Recovery uses bash 3.2,
+# so we use a while-read loop which works on all bash versions.
+all_installs=()
+while IFS= read -r _ai_line; do
+	all_installs+=("$_ai_line")
+done < <(detect_all_installations)
 
 # Guard: the function runs in a subshell – error_exit/exit there
 # cannot terminate the parent.  Check for empty result or sentinel.

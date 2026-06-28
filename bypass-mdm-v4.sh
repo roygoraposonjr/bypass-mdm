@@ -130,9 +130,10 @@ detect_all_installations() {
 		local _info _name _role _container
 		_info=$(diskutil info "$_disk" 2>/dev/null)
 		[ -z "$_info" ] && continue
-		_name=$(printf '%s\n' "$_info"      | awk -F':[[:space:]]+' '/Volume Name/  { print $2 }' | head -1)
-		_role=$(printf '%s\n' "$_info"      | awk -F':[[:space:]]+' '/APFS Role/    { print $2 }' | head -1)
-		_container=$(printf '%s\n' "$_info" | awk -F':[[:space:]]+' '/Part of Whole/{ print $2 }' | head -1)
+		# Strip all trailing whitespace/CR that would break string comparisons
+		_name=$(printf '%s\n' "$_info"      | awk -F':[[:space:]]+' '/Volume Name/  { print $2 }' | head -1 | tr -d '\r\n' | sed 's/[[:space:]]*$//')
+		_role=$(printf '%s\n' "$_info"      | awk -F':[[:space:]]+' '/APFS Role/    { print $2 }' | head -1 | tr -d '\r\n' | sed 's/[[:space:]]*$//')
+		_container=$(printf '%s\n' "$_info" | awk -F':[[:space:]]+' '/Part of Whole/{ print $2 }' | head -1 | tr -d '\r\n' | sed 's/[[:space:]]*$//')
 		[ -z "$_name" ] || [ -z "$_container" ] && continue
 		vol_records+=("${_disk}|${_name}|${_role}|${_container}")
 		info "  Volume: ${_name}  role='${_role}'  container='${_container}'" >&2
